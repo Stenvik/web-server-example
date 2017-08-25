@@ -13,6 +13,7 @@
 #include <functional>
 #include <iostream>
 #include <sstream>
+#include <regex>
 
 namespace SimpleWeb {
     template <class socket_type>
@@ -34,7 +35,7 @@ namespace SimpleWeb {
                 return streambuf.size();
             }
         };
-        
+
         class Content : public std::istream {
             friend class ServerBase<socket_type>;
         public:
@@ -50,10 +51,10 @@ namespace SimpleWeb {
             boost::asio::streambuf &streambuf;
             Content(boost::asio::streambuf &streambuf): std::istream(&streambuf), streambuf(streambuf) {}
         };
-        
+
         class Request {
             friend class ServerBase<socket_type>;
-            
+
             //Based on http://www.boost.org/doc/libs/1_60_0/doc/html/unordered/hash_equality.html
             class iequal_to {
             public:
@@ -78,16 +79,16 @@ namespace SimpleWeb {
             std::unordered_multimap<std::string, std::string, ihash, iequal_to> header;
 
             boost::smatch path_match;
-            
+
             std::string remote_endpoint_address;
             unsigned short remote_endpoint_port;
-            
+
         private:
             Request(): content(streambuf) {}
-            
+
             boost::asio::streambuf streambuf;
         };
-        
+
         class Config {
             friend class ServerBase<socket_type>;
 
@@ -103,19 +104,19 @@ namespace SimpleWeb {
         };
         ///Set before calling start().
         Config config;
-        
-        std::unordered_map<std::string, std::unordered_map<std::string, 
+
+        std::unordered_map<std::string, std::unordered_map<std::string,
             std::function<void(std::shared_ptr<typename ServerBase<socket_type>::Response>, std::shared_ptr<typename ServerBase<socket_type>::Request>)> > >  resource;
-        
-        std::unordered_map<std::string, 
+
+        std::unordered_map<std::string,
             std::function<void(std::shared_ptr<typename ServerBase<socket_type>::Response>, std::shared_ptr<typename ServerBase<socket_type>::Request>)> > default_resource;
-        
+
         std::function<void(const std::exception&)> exception_handler;
 
     private:
         std::vector<std::pair<std::string, std::vector<std::pair<boost::regex,
             std::function<void(std::shared_ptr<typename ServerBase<socket_type>::Response>, std::shared_ptr<typename ServerBase<socket_type>::Request>)> > > > > opt_resource;
-        
+
     public:
         void start() {
             //Copy the resources to opt_resource for more efficient request processing
@@ -150,9 +151,9 @@ namespace SimpleWeb {
             acceptor.set_option(boost::asio::socket_base::reuse_address(config.reuse_address));
             acceptor.bind(endpoint);
             acceptor.listen();
-     
-            accept(); 
-            
+
+            accept();
+
             //If num_threads>1, start m_io_service.run() in (num_threads-1) threads for thread-pooling
             threads.clear();
             for(size_t c=1;c<config.num_threads;c++) {
@@ -169,12 +170,12 @@ namespace SimpleWeb {
                 t.join();
             }
         }
-        
+
         void stop() {
             acceptor.close();
             io_service.stop();
         }
-        
+
         ///Use this function if you need to recursively send parts of a longer message
         void send(std::shared_ptr<Response> response, const std::function<void(const boost::system::error_code&)>& callback=nullptr) const {
             boost::asio::async_write(*response->socket, response->streambuf, [this, response, callback](const boost::system::error_code& ec, size_t /*bytes_transferred*/) {
@@ -187,16 +188,16 @@ namespace SimpleWeb {
         boost::asio::io_service io_service;
         boost::asio::ip::tcp::acceptor acceptor;
         std::vector<std::thread> threads;
-        
+
         long timeout_request;
         long timeout_content;
-        
+
         ServerBase(unsigned short port, size_t num_threads, long timeout_request, long timeout_send_or_receive) :
                 config(port, num_threads), acceptor(io_service),
                 timeout_request(timeout_request), timeout_content(timeout_send_or_receive) {}
-        
+
         virtual void accept()=0;
-        
+
         std::shared_ptr<boost::asio::deadline_timer> set_timeout_on_socket(std::shared_ptr<socket_type> socket, long seconds) {
             std::shared_ptr<boost::asio::deadline_timer> timer(new boost::asio::deadline_timer(io_service));
             timer->expires_from_now(boost::posix_time::seconds(seconds));
@@ -209,7 +210,7 @@ namespace SimpleWeb {
             });
             return timer;
         }
-        
+
         void read_request_and_content(std::shared_ptr<socket_type> socket) {
             //Create new streambuf (Request::streambuf) for async_read_until()
             //shared_ptr is used to pass temporary objects to the asynchronous functions
@@ -227,7 +228,7 @@ namespace SimpleWeb {
             std::shared_ptr<boost::asio::deadline_timer> timer;
             if(timeout_request>0)
                 timer=set_timeout_on_socket(socket, timeout_request);
-                        
+
             boost::asio::async_read_until(*socket, request->streambuf, "\r\n\r\n",
                     [this, socket, request, timer](const boost::system::error_code& ec, size_t bytes_transferred) {
                 if(timeout_request>0)
@@ -238,10 +239,10 @@ namespace SimpleWeb {
                     //The chosen solution is to extract lines from the stream directly when parsing the header. What is left of the
                     //streambuf (maybe some bytes of the content) is appended to in the async_read-function below (for retrieving content).
                     size_t num_additional_bytes=request->streambuf.size()-bytes_transferred;
-                    
+
                     if(!parse_request(request, request->content))
                         return;
-                    
+
                     //If content, read that as well
                     auto it=request->header.find("Content-Length");
                     if(it!=request->header.end()) {
@@ -284,6 +285,8 @@ namespace SimpleWeb {
 
         bool parse_request(std::shared_ptr<Request> request, std::istream& stream) const {
             std::string line;
+            std::string http_check_version;
+            static const boost::regex re("(^\\d*.\\d*$)");
             getline(stream, line);
             size_t method_end;
             if((method_end=line.find(' '))!=std::string::npos) {
@@ -294,9 +297,13 @@ namespace SimpleWeb {
 
                     size_t protocol_end;
                     if((protocol_end=line.find('/', path_end+1))!=std::string::npos) {
+                        http_check_version = line.substr(protocol_end+1, line.size()-protocol_end-2);
                         if(line.substr(path_end+1, protocol_end-path_end-1)!="HTTP")
                             return false;
-                        request->http_version=line.substr(protocol_end+1, line.size()-protocol_end-2);
+                        if(http_check_version.size() > 0 && boost::regex_match(http_check_version, re)){
+                            request->http_version=http_check_version;
+                        }
+                        else return false;
                     }
                     else
                         return false;
@@ -311,7 +318,7 @@ namespace SimpleWeb {
                             if(value_start<line.size())
                                 request->header.insert(std::make_pair(line.substr(0, param_end), line.substr(value_start, line.size()-value_start-1)));
                         }
-    
+
                         getline(stream, line);
                     }
                 }
@@ -342,8 +349,8 @@ namespace SimpleWeb {
                 write_response(socket, request, it_method->second);
             }
         }
-        
-        void write_response(std::shared_ptr<socket_type> socket, std::shared_ptr<Request> request, 
+
+        void write_response(std::shared_ptr<socket_type> socket, std::shared_ptr<Request> request,
                 std::function<void(std::shared_ptr<typename ServerBase<socket_type>::Response>,
                                    std::shared_ptr<typename ServerBase<socket_type>::Request>)>& resource_function) {
             //Set timeout on the following boost::asio::async-read or write function
@@ -358,7 +365,7 @@ namespace SimpleWeb {
                         if(timeout_content>0)
                             timer->cancel();
                         auto http_version=stof(request->http_version);
-                        
+
                         auto range=request->header.equal_range("Connection");
                         for(auto it=range.first;it!=range.second;it++) {
                             if(boost::iequals(it->second, "close"))
@@ -380,32 +387,32 @@ namespace SimpleWeb {
             }
         }
     };
-    
+
     template<class socket_type>
     class Server : public ServerBase<socket_type> {};
-    
+
     typedef boost::asio::ip::tcp::socket HTTP;
-    
+
     template<>
     class Server<HTTP> : public ServerBase<HTTP> {
     public:
         Server(unsigned short port, size_t num_threads=1, long timeout_request=5, long timeout_content=300) :
                 ServerBase<HTTP>::ServerBase(port, num_threads, timeout_request, timeout_content) {}
-        
+
     protected:
         void accept() {
             //Create new socket for this connection
             //Shared_ptr is used to pass temporary objects to the asynchronous functions
             std::shared_ptr<HTTP> socket(new HTTP(io_service));
-                        
+
             acceptor.async_accept(*socket, [this, socket](const boost::system::error_code& ec){
                 //Immediately start accepting a new connection
                 accept();
-                                
+
                 if(!ec) {
                     boost::asio::ip::tcp::no_delay option(true);
                     socket->set_option(option);
-                    
+
                     read_request_and_content(socket);
                 }
             });
